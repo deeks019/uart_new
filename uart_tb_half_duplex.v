@@ -1,6 +1,5 @@
 `timescale 1ns/1ps
 module uart_tb;
-parameter CLKS_PER_BIT = 1;  // Number of clock cycles used for each transmitted or received bit
 parameter TX_DATA1 = 8'hA5;  // The data to be sent from Device 1 to Device 2
 parameter TX_DATA2 = 8'h3C;  // The data to be sent from Device 2 to Device 1
 
@@ -8,6 +7,7 @@ reg clk;                     // Common clock for both devices
 reg reset;                   // Reset signal for both devices
 reg tx_start1;               // Starts transmission from Device 1
 reg tx_start2;               // Starts transmission from Device 2
+reg [1:0] baud_select;       // Baud rate selection
 
 wire tx_active1;             // HIGH while Device 1 is transmitting
 wire tx_done1;               // HIGH when Device 1 finishes transmission
@@ -23,15 +23,14 @@ wire rx_valid2;              // HIGH when Device 2 has received valid data
 
 
 // Device 1
-device #(
-    .CLKS_PER_BIT(CLKS_PER_BIT) // Pass CLKS_PER_BIT from the testbench to Device 1
-) d1 (
+device d1 (
     .clk(clk),
     .reset(reset),
+    .baud_select(baud_select),
     .tx_start(tx_start1),
     .tx_data(TX_DATA1),
     .tx_active(tx_active1),
-    .tx_done(tx_done1),
+    .tx_done(tx_done1), 
     .serial_tx(serial_tx1), // Device 1 serial output
     .serial_rx(serial_tx2), // Device 1 receives the serial output from Device 2
     .rx_data(rx_data1),
@@ -40,11 +39,10 @@ device #(
 
 
 // Device 2
-device #(
-    .CLKS_PER_BIT(CLKS_PER_BIT) // Pass CLKS_PER_BIT from the testbench to Device 2
-) d2 (
+device d2(
     .clk(clk),
     .reset(reset),
+    .baud_select(baud_select),
     .tx_start(tx_start2),
     .tx_data(TX_DATA2),
     .tx_active(tx_active2),
@@ -67,6 +65,7 @@ initial begin
     reset = 1;                   // Reset both devices
     tx_start1 = 0;               // Device 1 transmission is not started
     tx_start2 = 0;               // Device 2 transmission is not started
+    baud_select = 2'b11;    //115200 baud
     #10;                          // Wait for 10 ns
     reset = 0;                   // Remove reset so the devices can start working
     @(posedge clk);              // Wait for the next positive edge of the clock
@@ -80,6 +79,7 @@ initial begin
     wait(rx_valid2);             // Wait until Device 2 says that received data is valid
     $display("Device 1 transmitted = %h", TX_DATA1); // Display data sent by Device 1
     $display("Device 2 received    = %h", rx_data2); // Display data received by Device 2
+    baud_select = 2'b00;
     @(posedge clk);              // Wait for the next positive edge of the clock
     
     // Device 2 starts transmitting

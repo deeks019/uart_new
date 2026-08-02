@@ -1,8 +1,7 @@
-module device #(
-    parameter CLKS_PER_BIT = 1
-)(
+module device(
     input clk,              // Common clock used by both transmitter and receiver
     input reset,            // Resets the transmitter and receiver
+    input [1:0] baud_select, // To select the baud rate
 
     input tx_start,         // Signal used to start transmission
     input [7:0] tx_data,    // 8-bit data that has to be transmitted
@@ -20,8 +19,9 @@ module device #(
 parameter IDLE  = 0;        // Waiting for transmission/reception to start
 parameter START = 1;        // Start bit has been sent
 parameter DATA  = 2;        // Sending or receiving the 8 data bits
-parameter STOP  = 3;        // Sending or detecting the stop bit
-parameter DONE  = 4;        // Transmission/reception is complete
+parameter PARITY = 3;       // Sending or receiving parity bit
+parameter STOP = 4;         // Sending or detecting the stop bit
+parameter DONE  = 5;        // Transmission/reception is complete
 
 
 reg [2:0] tx_state;         // Stores the current transmitter state
@@ -30,9 +30,22 @@ reg [2:0] tx_bit;           // Counts the transmitted data bits
 reg [2:0] rx_bit;           // Counts the received data bits
 reg [7:0] tx_reg;           // Stores tx_data while it is being transmitted
 reg [7:0] rx_reg;           // Stores the received bits
+reg tx_parity;              //Stores the Tx parity bit
+reg rx_parity;              // Stores the Rx parity bit
 
 reg [15:0] tx_clk_count;    // Counts clock cycles for transmission
 reg [15:0] rx_clk_count;    // Counts clock cycles for reception
+reg [15:0] CLKS_PER_BIT;    // For different clks_per_bit
+
+always @(*) begin
+    case (baud_select)
+        2'b00: CLKS_PER_BIT = 1; //9600 baud (10 MHz clock)
+        2'b01: CLKS_PER_BIT = 2;  //19200 baud
+        2'b10: CLKS_PER_BIT = 3;  //57600 baud
+        2'b11: CLKS_PER_BIT = 4;   //115200 baud
+        default: CLKS_PER_BIT = 5;
+    endcase
+end
 
 
 // TRANSMITTER
@@ -60,6 +73,7 @@ always @(posedge clk or posedge reset) begin
 
                 if (tx_start) begin
                     tx_reg <= tx_data;   // Store the data that has to be transmitted
+                    tx_parity <= ^tx_data;
                     tx_active <= 1;      // Transmission starts
                     serial_tx <= 0;      // Send the start bit (LOW)
                     tx_state <= START;   // Move to START state
@@ -92,7 +106,7 @@ always @(posedge clk or posedge reset) begin
                     tx_reg <= tx_reg >> 1;  // Shift right for the next data bit
 
                     if (tx_bit == 7) begin
-                        tx_state <= STOP;    // All 8 data bits have now been sent
+                        tx_state <= PARITY;    // All 8 data bits have now been sent
                     end
 
                     else begin
@@ -105,8 +119,21 @@ always @(posedge clk or posedge reset) begin
                 end
 
             end
-
-
+            
+            PARITY: begin
+              
+               if(tx_clk_count == CLKS_PER_BIT-1) begin
+               tx_clk_count<=0;
+               serial_tx <= tx_parity; //Send the parity bit (even parity)
+               tx_state <= STOP;       //Move to STOP state
+               end
+               
+               else begin
+               tx_clk_count <= tx_clk_count+1; 
+               end
+               end
+               
+               
             STOP: begin
 
                 if (tx_clk_count == CLKS_PER_BIT - 1) begin
@@ -191,7 +218,7 @@ always @(posedge clk or posedge reset) begin
                     rx_reg <= {serial_rx, rx_reg[7:1]};
 
                     if (rx_bit == 7) begin
-                        rx_state <= STOP;     // All 8 data bits have been received
+                        rx_state <= PARITY;     // All 8 data bits have been received
                     end
 
                     else begin
@@ -203,7 +230,25 @@ always @(posedge clk or posedge reset) begin
                     rx_clk_count <= rx_clk_count + 1;
                 end
             end
-
+            
+            PARITY: begin
+             
+             if(rx_clk_count == CLKS_PER_BIT-1) begin
+             rx_clk_count<=0;
+             
+             rx_parity <= serial_rx; //Store the parity in the rx line
+             
+             if(serial_rx == ^rx_reg) //The receiver computes the XOR and matches it with the parity bit received    
+              rx_state <= STOP;   //If it matches, move to the STOP state
+             else
+              rx_state <= IDLE;   //If it does not match, move back to the IDLE state
+             end
+             
+             else begin
+             rx_clk_count <= rx_clk_count +1;
+             end
+             end       
+      
 
             STOP: begin
 
