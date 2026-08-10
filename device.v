@@ -32,9 +32,9 @@ reg [7:0] tx_reg;                           // Stores data during TX
 reg [7:0] rx_reg;                           // Stores data during RX
 reg tx_parity;                              // Stores TX parity
 reg rx_parity;                              // Stores RX parity
-reg [15:0] tx_clk_count;                    // TX clock counter
-reg [15:0] rx_clk_count;                    // RX clock counter
-reg [15:0] CLKS_PER_BIT;                    // Clock cycles for one bit
+reg [7:0] count;                            // Counter for clock divider
+reg baud_clk;                               // Generated baud clock
+
 always @(*) begin                           // Select number of data bits
     case(data_length)                       // Check data length
         2'b00: NUM_DATA_BITS = 5;           // Select 5 data bits
@@ -46,18 +46,26 @@ always @(*) begin                           // Select number of data bits
 end                                         // End data length block
 
 
-always @(*) begin                           // Select clock cycles per bit
+always @(posedge clk or posedge reset) begin // Baud clock divider
+    if (reset) begin                        // Check for reset
+        count <= 0;                         // Reset counter
+    end
+    else begin                              // Normal operation
+        count <= count + 1;                 // Increment counter
+    end
+end                                         // End counter block
+
+always @(*) begin                           // Select baud clock
     case (baud_select)                      // Check baud selection
-        2'b00: CLKS_PER_BIT = 1;            // Use 1 clock per bit
-        2'b01: CLKS_PER_BIT = 1;            // Use 2 clocks per bit
-        2'b10: CLKS_PER_BIT = 1;            // Use 3 clocks per bit
-        2'b11: CLKS_PER_BIT = 1;            // Use 4 clocks per bit
-        default: CLKS_PER_BIT = 1;          // Use 4 clocks by default
+        2'b00: baud_clk = count[0];         // Use bit 0 for divide
+        2'b01: baud_clk = count[1];         // Use bit 1 for divide
+        2'b10: baud_clk = count[2];         // Use bit 2 for divide
+        2'b11: baud_clk = count[3];         // Use bit 3 for divide
     endcase                                  // End baud case
 end                                         // End baud selection block
 
 // TRANSMITTER
-always @(posedge clk or posedge reset) begin // TX runs on clock or reset
+always @(posedge baud_clk or posedge reset) begin // TX runs on baud clock
     if (reset) begin                        // Check for reset
         tx_state <= IDLE;                   // Go to idle state
         tx_bit <= 0;                        // Reset TX bit counter
@@ -65,7 +73,6 @@ always @(posedge clk or posedge reset) begin // TX runs on clock or reset
         tx_active <= 0;                     // TX is not active
         tx_done <= 0;                       // Clear TX done signal
         serial_tx <= 1;                     // Keep serial line high
-        tx_clk_count <= 0;                  // Reset TX clock counter
     end
     else begin                              // Normal operation
         tx_done <= 0;                       // Clear done signal
@@ -75,7 +82,6 @@ always @(posedge clk or posedge reset) begin // TX runs on clock or reset
                 tx_active <= 0;              // TX is not active
                 serial_tx <= 1;              // Keep line high
                 tx_bit <= 0;                 // Reset bit counter
-                tx_clk_count <= 0;           // Reset clock counter
                 if (tx_start) begin         // Start when tx_start is high
 
                     case (NUM_DATA_BITS)     // Check number of data bits
@@ -100,68 +106,38 @@ always @(posedge clk or posedge reset) begin // TX runs on clock or reset
             end
 
             START: begin                     // Send start bit
-                if (tx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    tx_clk_count <= 0;       // Reset clock counter
-                    serial_tx <= tx_reg[0];  // Send first data bit
-                    tx_reg <= tx_reg >> 1;   // Shift data right
-                    tx_bit <= 1;             // Set bit counter
-                    tx_state <= DATA;        // Go to data state
-                end
-                else begin
-                    tx_clk_count <= tx_clk_count + 1; // Count clock cycles
-                end
+                serial_tx <= tx_reg[0];      // Send first data bit
+                tx_reg <= tx_reg >> 1;       // Shift data right
+                tx_bit <= 1;                 // Set bit counter
+                tx_state <= DATA;            // Go to data state
             end
 
             DATA: begin                      // Send data bits
-                if (tx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    tx_clk_count <= 0;       // Reset clock counter
-                    serial_tx <= tx_reg[0];  // Send current data bit
-                    tx_reg <= tx_reg >> 1;   // Shift to next bit
-                    if (tx_bit == NUM_DATA_BITS - 1) begin // Check last bit
-                        tx_state <= PARITY;   // Go to parity state
-                    end
-                    else begin
-                        tx_bit <= tx_bit + 1; // Move to next bit
-                    end
+                serial_tx <= tx_reg[0];      // Send current data bit
+                tx_reg <= tx_reg >> 1;       // Shift to next bit
+                if (tx_bit == NUM_DATA_BITS - 1) begin // Check last bit
+                    tx_state <= PARITY;      // Go to parity state
                 end
-
                 else begin
-                    tx_clk_count <= tx_clk_count + 1; // Count clock cycles
+                    tx_bit <= tx_bit + 1;    // Move to next bit
                 end
             end
 
             PARITY: begin                    // Send parity bit
-                if(tx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    tx_clk_count <= 0;       // Reset clock counter
-                    serial_tx <= tx_parity; // Send parity bit
-                    tx_state <= STOP;        // Go to stop state
-                end
-
-                else begin
-                    tx_clk_count <= tx_clk_count + 1; // Count clock cycles
-                end
+                serial_tx <= tx_parity;      // Send parity bit
+                tx_state <= STOP;            // Go to stop state
             end
-
 
             STOP: begin                      // Send stop bit
-                if (tx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    tx_clk_count <= 0;       // Reset clock counter
-                    serial_tx <= 1;          // Send stop bit
-                    tx_state <= DONE;       // Go to done state
-                end
-
-                else begin
-                    tx_clk_count <= tx_clk_count + 1; // Count clock cycles
-                end
+                serial_tx <= 1;              // Send stop bit
+                tx_state <= DONE;            // Go to done state
             end
-
 
             DONE: begin                      // Transmission is complete
                 tx_active <= 0;              // TX is no longer active
                 tx_done <= 1;                // Tell that TX is complete
                 tx_state <= IDLE;            // Go back to idle
             end
-
 
             default: begin                   // If state is invalid
                 tx_state <= IDLE;            // Go back to idle
@@ -170,14 +146,13 @@ always @(posedge clk or posedge reset) begin // TX runs on clock or reset
     end
 end
 
-always @(posedge clk or posedge reset) begin // RX runs on clock or reset
+always @(posedge baud_clk or posedge reset) begin // RX runs on baud clock
     if (reset) begin                        // Check for reset
         rx_state <= IDLE;                   // Go to idle state
         rx_bit <= 0;                        // Reset RX bit counter
         rx_reg <= 0;                        // Clear RX register
         rx_data <= 0;                       // Clear received data
         rx_valid <= 0;                      // Clear valid signal
-        rx_clk_count <= 0;                  // Reset RX clock counter
     end
 
     else begin                              // Normal operation
@@ -185,99 +160,68 @@ always @(posedge clk or posedge reset) begin // RX runs on clock or reset
         case (rx_state)                     // Check current RX state
             IDLE: begin                     // Wait for start bit
                 rx_bit <= 0;                 // Reset bit counter
-                rx_clk_count <= 0;           // Reset clock counter
                 if (serial_rx == 0) begin   // Check for start bit
                     rx_reg <= 0;             // Clear RX register
                     rx_state <= START;      // Go to start state
                 end
             end
 
-
             START: begin                    // Receive start bit
-                if (rx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    rx_clk_count <= 0;      // Reset clock counter
-                    rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
-                    rx_bit <= 1;            // Set bit counter
-                    rx_state <= DATA;       // Go to data state
-                end
-
-                else begin
-                    rx_clk_count <= rx_clk_count + 1; // Count clock cycles
-                end
+                rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
+                rx_bit <= 1;                // Set bit counter
+                rx_state <= DATA;           // Go to data state
             end
 
             DATA: begin                     // Receive data bits
-                if (rx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    rx_clk_count <= 0;      // Reset clock counter
-                    rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
-                    if (rx_bit == NUM_DATA_BITS - 1) begin // Check last bit
-                        rx_state <= PARITY;  // Go to parity state
-                    end
-
-                    else begin
-                        rx_bit <= rx_bit + 1; // Move to next bit
-                    end
+                rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
+                if (rx_bit == NUM_DATA_BITS - 1) begin // Check last bit
+                    rx_state <= PARITY;      // Go to parity state
                 end
-
                 else begin
-                    rx_clk_count <= rx_clk_count + 1; // Count clock cycles
+                    rx_bit <= rx_bit + 1;    // Move to next bit
                 end
             end
 
             PARITY: begin                   // Receive parity bit
-                if (rx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    rx_clk_count <= 0;      // Reset clock counter
-                    rx_parity <= serial_rx; // Store received parity
-                    case (NUM_DATA_BITS)    // Check number of data bits
-                        5: begin             // For 5 data bits
-                            if (serial_rx == ^rx_reg[4:0]) // Check parity
-                                rx_state <= STOP;         // Parity is correct
-                            else
-                                rx_state <= IDLE;         // Parity is wrong
-                        end
+                rx_parity <= serial_rx;     // Store received parity
+                case (NUM_DATA_BITS)        // Check number of data bits
+                    5: begin                 // For 5 data bits
+                        if (serial_rx == ^rx_reg[4:0]) // Check parity
+                            rx_state <= STOP;         // Parity is correct
+                        else
+                            rx_state <= IDLE;         // Parity is wrong
+                    end
 
-                        6: begin             // For 6 data bits
-                            if (serial_rx == ^rx_reg[5:0]) // Check parity
-                                rx_state <= STOP;         // Parity is correct
-                            else
-                                rx_state <= IDLE;         // Parity is wrong
-                        end
+                    6: begin                 // For 6 data bits
+                        if (serial_rx == ^rx_reg[5:0]) // Check parity
+                            rx_state <= STOP;         // Parity is correct
+                        else
+                            rx_state <= IDLE;         // Parity is wrong
+                    end
 
-                        7: begin             // For 7 data bits
-                            if (serial_rx == ^rx_reg[6:0]) // Check parity
-                                rx_state <= STOP;          // Parity is correct
-                            else
-                                rx_state <= IDLE;          // Parity is wrong
-                        end
+                    7: begin                 // For 7 data bits
+                        if (serial_rx == ^rx_reg[6:0]) // Check parity
+                            rx_state <= STOP;          // Parity is correct
+                        else
+                            rx_state <= IDLE;          // Parity is wrong
+                    end
 
-                        8: begin             // For 8 data bits
-                            if (serial_rx == ^rx_reg[7:0]) // Check parity
-                                rx_state <= STOP;          // Parity is correct
-                            else
-                                rx_state <= IDLE;          // Parity is wrong
-                        end
+                    8: begin                 // For 8 data bits
+                        if (serial_rx == ^rx_reg[7:0]) // Check parity
+                            rx_state <= STOP;          // Parity is correct
+                        else
+                            rx_state <= IDLE;          // Parity is wrong
+                    end
 
-                        default: rx_state <= IDLE; // Go idle for invalid value
-                    endcase                  // End parity check
-                end
-                
-                else begin
-                    rx_clk_count <= rx_clk_count + 1; // Count clock cycles
-                end
+                    default: rx_state <= IDLE; // Go idle for invalid value
+                endcase                      // End parity check
             end
 
             STOP: begin                     // Receive stop bit
-                if (rx_clk_count == CLKS_PER_BIT - 1) begin // Wait one bit time
-                    rx_clk_count <= 0;      // Reset clock counter
-                    if (serial_rx == 1)     // Check stop bit
-                        rx_state <= DONE;   // Stop bit is correct
-                    else
-                        rx_state <= IDLE;   // Stop bit is wrong
-                end
-
-                else begin
-                    rx_clk_count <= rx_clk_count + 1; // Count clock cycles
-                end
+                if (serial_rx == 1)         // Check stop bit
+                    rx_state <= DONE;       // Stop bit is correct
+                else
+                    rx_state <= IDLE;       // Stop bit is wrong
             end
 
             DONE: begin                     // Reception is complete
