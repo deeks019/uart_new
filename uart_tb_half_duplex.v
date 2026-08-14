@@ -22,6 +22,8 @@ wire tx_done2;                        // TX done signal of Device 2
 wire serial_tx2;                      // Serial output of Device 2
 wire [7:0] rx_data2;                  // Data received by Device 2
 wire rx_valid2;                       // RX valid signal of Device 2
+reg loopback_en1;
+reg loopback_en2;
 
 device d1 (                            // Create Device 1
 .clk(clk),                        // Connect clock
@@ -35,7 +37,8 @@ device d1 (                            // Create Device 1
 .serial_tx(serial_tx1),            // Connect serial TX
 .serial_rx(serial_tx2),            // Receive data from Device 2
 .rx_data(rx_data1),                // Connect received data
-.rx_valid(rx_valid1)               // Connect RX valid
+.rx_valid(rx_valid1),              // Connect RX valid
+.loopback_en(loopback_en1)
 );
 
 device d2 (                            // Create Device 2
@@ -50,10 +53,13 @@ device d2 (                            // Create Device 2
 .serial_tx(serial_tx2),            // Connect serial TX
 .serial_rx(serial_tx1),            // Receive data from Device 1
 .rx_data(rx_data2),                // Connect received data
-.rx_valid(rx_valid2)               // Connect RX valid
+.rx_valid(rx_valid2),              // Connect RX valid
+.loopback_en(loopback_en2)
 );
 
-initial begin                          // Start clock generation
+initial begin
+    loopback_en1 = 0;
+    loopback_en2 = 0;                          // Start clock generation
 clk = 0;                           // Start clock at 0
 forever #5 clk = ~clk;             // Toggle clock every 5 ns
 end
@@ -69,6 +75,52 @@ data_length = 2'b11;               // Select 8-bit mode
 repeat(2) @(posedge clk);           // Wait for 2 clock edges
 reset = 0;                         // Remove reset
 @(posedge clk);                    // Wait for one clock edge
+
+// Loopback Mode
+loopback_en1 = 1;               // Enable loopback on Device 1
+loopback_en2 = 0;               // Keep Device 2 normal
+data_length = 2'b11;            // Select 8-bit data
+baud_select = 2'b11;            // Select baud setting 1
+@(posedge clk);                 // Wait for one clock edge
+
+tx_start1 = 1;                  // Start Device 1 transmission
+wait(tx_active1);               // Wait until Device 1 TX starts
+tx_start1 = 0;                  // Stop TX start signal
+wait(rx_valid1);                // Wait until Device 1 receives its own data
+
+$display("\n----- Loopback Mode ----");
+$display("Device 1 transmitted = %h", TX_DATA1);
+$display("Device 1 received    = %h", rx_data1);
+
+//Stop loopback
+loopback_en1 = 0;
+loopback_en2 = 0;
+reset = 1;
+@(posedge clk);
+reset = 0;
+
+// Loopback Mode
+loopback_en1 = 0;               // Keep Device 1 normal
+loopback_en2 = 1;               // Enable loopback on Device 2
+data_length = 2'b11;            // Select 8-bit data
+baud_select = 2'b11;            // Select baud setting 1
+@(posedge clk);                 // Wait for one clock edge
+
+tx_start2 = 1;                  // Start Device 2 transmission
+wait(tx_active2);               // Wait until Device 2 TX starts
+tx_start2 = 0;                  // Stop TX start signal
+wait(rx_valid2);                // Wait until Device 2 receives its own data
+
+$display("\n----- Loopback Mode ----");
+$display("Device 2 transmitted = %h", TX_DATA2);
+$display("Device 2 received    = %h", rx_data2);
+
+// Stop loopback
+loopback_en1 = 0;
+loopback_en2 = 0;
+reset = 1;
+@(posedge clk);
+reset = 0;
 
 
 // 5-bit Mode
