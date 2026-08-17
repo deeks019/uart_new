@@ -25,6 +25,12 @@ wire rx_valid2;                       // RX valid signal of Device 2
 reg loopback_en1;
 reg loopback_en2;
 
+wire serial_rx1;
+wire serial_rx2;
+
+assign serial_rx1 = loopback_en1 ? serial_tx1 : serial_tx2;
+assign serial_rx2 = loopback_en2 ? serial_tx2 : serial_tx1;
+
 device d1 (                            // Create Device 1
 .clk(clk),                        // Connect clock
 .reset(reset),                    // Connect reset
@@ -35,10 +41,9 @@ device d1 (                            // Create Device 1
 .tx_active(tx_active1),            // Connect TX active
 .tx_done(tx_done1),                // Connect TX done
 .serial_tx(serial_tx1),            // Connect serial TX
-.serial_rx(serial_tx2),            // Receive data from Device 2
+.serial_rx(serial_rx1),                // Receive data from Device 2
 .rx_data(rx_data1),                // Connect received data
-.rx_valid(rx_valid1),              // Connect RX valid
-.loopback_en(loopback_en1)
+.rx_valid(rx_valid1)               // Connect RX valid
 );
 
 device d2 (                            // Create Device 2
@@ -47,14 +52,13 @@ device d2 (                            // Create Device 2
 .baud_select(baud_select),        // Connect baud selection
 .data_length(data_length),        // Connect data length
 .tx_start(tx_start2),              // Connect TX start
-.tx_data(TX_DATA2),                // Connect TX data
+.tx_data(TX_DATA2),              // Connect TX data
 .tx_active(tx_active2),            // Connect TX active
 .tx_done(tx_done2),                // Connect TX done
 .serial_tx(serial_tx2),            // Connect serial TX
-.serial_rx(serial_tx1),            // Receive data from Device 1
+.serial_rx(serial_rx2),                // Receive data from Device 1
 .rx_data(rx_data2),                // Connect received data
-.rx_valid(rx_valid2),              // Connect RX valid
-.loopback_en(loopback_en2)
+.rx_valid(rx_valid2)               // Connect RX valid
 );
 
 initial begin

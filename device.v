@@ -5,7 +5,6 @@ input [1:0] baud_select,                    // Selects baud rate
 input [1:0] data_length,                    // Selects number of data bits
 input tx_start,                             // Starts transmission
 input [7:0] tx_data,                        // Data to transmit
-input loopback_en,
 
 output reg tx_active,                       // Shows TX is active
 output reg tx_done,                         // Shows TX is complete
@@ -36,8 +35,6 @@ reg rx_parity;                              // Stores RX parity
 reg [7:0] count;                            // Counter for clock divider
 reg baud_clk;                               // Generated baud clock
 
-wire rx_input;
-assign rx_input = loopback_en ? serial_tx : serial_rx;
 
 always @(*) begin                           // Select number of data bits
     case(data_length)                       // Check data length
@@ -164,20 +161,20 @@ always @(posedge baud_clk or posedge reset) begin // RX runs on baud clock
         case (rx_state)                     // Check current RX state
             IDLE: begin                     // Wait for start bit
                 rx_bit <= 0;                 // Reset bit counter
-                if (rx_input == 0) begin   // Check for start bit
+                if (serial_rx == 0) begin   // Check for start bit
                     rx_reg <= 0;             // Clear RX register
                     rx_state <= START;      // Go to start state
                 end
             end
 
             START: begin                    // Receive start bit
-                rx_reg <= {rx_reg[6:0], rx_input}; // Store received bit
+                rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
                 rx_bit <= 1;                // Set bit counter
                 rx_state <= DATA;           // Go to data state
             end
 
             DATA: begin                     // Receive data bits
-                rx_reg <= {rx_reg[6:0], rx_input}; // Store received bit
+                rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
                 if (rx_bit == NUM_DATA_BITS - 1) begin // Check last bit
                     rx_state <= PARITY;      // Go to parity state
                 end
@@ -187,31 +184,31 @@ always @(posedge baud_clk or posedge reset) begin // RX runs on baud clock
             end
 
             PARITY: begin                   // Receive parity bit
-                rx_parity <= rx_input;     // Store received parity
-                case (NUM_DATA_BITS)        // Check number of data bits
+                rx_parity <= serial_rx;     // Store received parity
+                case (NUM_DATA_BITS)        // Check parity
                     5: begin                 // For 5 data bits
-                        if (rx_input == ^rx_reg[4:0]) // Check parity
+                        if (serial_rx == ^rx_reg[4:0]) // Check parity
                             rx_state <= STOP;         // Parity is correct
                         else
                             rx_state <= IDLE;         // Parity is wrong
                     end
 
                     6: begin                 // For 6 data bits
-                        if (rx_input == ^rx_reg[5:0]) // Check parity
+                        if (serial_rx == ^rx_reg[5:0]) // Check parity
                             rx_state <= STOP;         // Parity is correct
                         else
                             rx_state <= IDLE;         // Parity is wrong
                     end
 
                     7: begin                 // For 7 data bits
-                        if (rx_input == ^rx_reg[6:0]) // Check parity
+                        if (serial_rx == ^rx_reg[6:0]) // Check parity
                             rx_state <= STOP;          // Parity is correct
                         else
                             rx_state <= IDLE;          // Parity is wrong
                     end
 
                     8: begin                 // For 8 data bits
-                        if (rx_input == ^rx_reg[7:0]) // Check parity
+                        if (serial_rx == ^rx_reg[7:0]) // Check parity
                             rx_state <= STOP;          // Parity is correct
                         else
                             rx_state <= IDLE;          // Parity is wrong
@@ -222,14 +219,14 @@ always @(posedge baud_clk or posedge reset) begin // RX runs on baud clock
             end
 
             STOP: begin                     // Receive stop bit
-                if (rx_input == 1)         // Check stop bit
+                if (serial_rx == 1)         // Check stop bit
                     rx_state <= DONE;       // Stop bit is correct
                 else
                     rx_state <= IDLE;       // Stop bit is wrong
             end
 
             DONE: begin                     // Reception is complete
-                case(NUM_DATA_BITS)         // Check number of data bits
+                case(NUM_DATA_BITS)         // Check data length
                     5: rx_data <= {3'b000, rx_reg[0], rx_reg[1], rx_reg[2], rx_reg[3], rx_reg[4]};
                     // Put 5 received bits into rx_data
                     6: rx_data <= {2'b00, rx_reg[0], rx_reg[1], rx_reg[2], rx_reg[3], rx_reg[4], rx_reg[5]};
@@ -247,7 +244,9 @@ always @(posedge baud_clk or posedge reset) begin // RX runs on baud clock
             default: begin                       // If state is invalid
                 rx_state <= IDLE;                 // Go back to idle
             end
+
         endcase                                  // End RX state case
     end
 end
+
 endmodule                                       // End of module
