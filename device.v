@@ -1,252 +1,353 @@
-module device(                              // Main device module
-input clk,                                  // Clock input
-input reset,                                // Reset input
-input [1:0] baud_select,                    // Selects baud rate
-input [1:0] data_length,                    // Selects number of data bits
-input tx_start,                             // Starts transmission
-input [7:0] tx_data,                        // Data to transmit
+module device(
+    input clk,
+    input reset,
+    input [1:0] baud_select,
+    input [1:0] data_length,
+    input tx_start,
+    input [7:0] tx_data,
 
-output reg tx_active,                       // Shows TX is active
-output reg tx_done,                         // Shows TX is complete
-output reg serial_tx,                       // Serial transmit signal
+    output reg tx_active,
+    output reg tx_done,
+    output reg serial_tx,
 
-input serial_rx,                            // Serial receive signal
-output reg [7:0] rx_data,                   // Received data
-output reg rx_valid                         // Shows RX data is valid
+    input serial_rx,
+    input rx_read,
+    output [7:0] rx_data,
+    output rx_valid,
+    output reg parity_error,
+    output reg framing_error,
+    output reg overrun_error
 );
 
-parameter IDLE   = 0;                       // Waiting state
-parameter START  = 1;                       // Start bit state
-parameter DATA   = 2;                       // Data bit state
-parameter PARITY = 3;                       // Parity bit state
-parameter STOP   = 4;                       // Stop bit state
-parameter DONE   = 5;                       // Done state
+    reg [7:0] tx_fifo [0:15];
+    reg [7:0] rx_fifo [0:15];
 
+    reg [3:0] tx_wr_ptr, tx_rd_ptr;
+    reg [3:0] rx_wr_ptr, rx_rd_ptr;
 
-reg [2:0] tx_state;                         // Stores TX state
-reg [2:0] rx_state;                         // Stores RX state
-reg [2:0] tx_bit;                           // Counts TX bits
-reg [2:0] rx_bit;                           // Counts RX bits
-reg [3:0] NUM_DATA_BITS;                    // Stores number of data bits
-reg [7:0] tx_reg;                           // Stores data during TX
-reg [7:0] rx_reg;                           // Stores data during RX
-reg tx_parity;                              // Stores TX parity
-reg rx_parity;                              // Stores RX parity
-reg [7:0] count;                            // Counter for clock divider
-reg baud_clk;                               // Generated baud clock
+    reg [4:0] tx_count, rx_count;
 
+    assign rx_valid = (rx_count != 0);
+    assign rx_data  = (rx_count != 0) ? rx_fifo[rx_rd_ptr] : 8'h00;
 
-always @(*) begin                           // Select number of data bits
-    case(data_length)                       // Check data length
-        2'b00: NUM_DATA_BITS = 5;           // Select 5 data bits
-        2'b01: NUM_DATA_BITS = 6;           // Select 6 data bits
-        2'b10: NUM_DATA_BITS = 7;           // Select 7 data bits
-        2'b11: NUM_DATA_BITS = 8;           // Select 8 data bits
-        default: NUM_DATA_BITS = 8;         // Use 8 bits by default
-    endcase                                  // End data length case
-end                                         // End data length block
+    // Using parameter so states can be overridden if needed by external code
+    parameter IDLE   = 3'd0;
+    parameter START  = 3'd1;
+    parameter DATA   = 3'd2;
+    parameter PARITY = 3'd3;
+    parameter STOP   = 3'd4;
 
+    reg [2:0] tx_state, rx_state;
+    reg [2:0] tx_bit, rx_bit;
+    reg [3:0] num_data_bits;
 
-always @(posedge clk or posedge reset) begin // Baud clock divider
-    if (reset) begin                        // Check for reset
-        count <= 0;                         // Reset counter
-    end
-    else begin                              // Normal operation
-        count <= count + 1;                 // Increment counter
-    end
-end                                         // End counter block
+    reg [7:0] tx_reg, rx_reg;
+    reg tx_parity;
 
-always @(*) begin                           // Select baud clock
-    case (baud_select)                      // Check baud selection
-        2'b00: baud_clk = count[0];         // Use bit 0 for divide
-        2'b01: baud_clk = count[1];         // Use bit 1 for divide
-        2'b10: baud_clk = count[2];         // Use bit 2 for divide
-        2'b11: baud_clk = count[3];         // Use bit 3 for divide
-    endcase                                  // End baud case
-end                                         // End baud selection block
+    reg [7:0] baud_count;
+    reg baud_tick;
 
-// TRANSMITTER
-always @(posedge baud_clk or posedge reset) begin // TX runs on baud clock
-    if (reset) begin                        // Check for reset
-        tx_state <= IDLE;                   // Go to idle state
-        tx_bit <= 0;                        // Reset TX bit counter
-        tx_reg <= 0;                        // Clear TX register
-        tx_active <= 0;                     // TX is not active
-        tx_done <= 0;                       // Clear TX done signal
-        serial_tx <= 1;                     // Keep serial line high
-    end
-    else begin                              // Normal operation
-        tx_done <= 0;                       // Clear done signal
-
-        case (tx_state)                     // Check current TX state
-            IDLE: begin                     // Wait for transmission
-                tx_active <= 0;              // TX is not active
-                serial_tx <= 1;              // Keep line high
-                tx_bit <= 0;                 // Reset bit counter
-                if (tx_start) begin         // Start when tx_start is high
-
-                    case (NUM_DATA_BITS)     // Check number of data bits
-                        5: tx_reg <= {3'b000, tx_data[4:0]}; // Store 5 bits
-                        6: tx_reg <= {2'b00, tx_data[5:0]};   // Store 6 bits
-                        7: tx_reg <= {1'b0, tx_data[6:0]};   // Store 7 bits
-                        8: tx_reg <= tx_data;                // Store 8 bits
-                    endcase                  // End data bits case
-
-                    case(NUM_DATA_BITS)      // Calculate parity
-                        5: tx_parity <= ^tx_data[4:0];       // Parity for 5 bits
-                        6: tx_parity <= ^tx_data[5:0];       // Parity for 6 bits
-                        7: tx_parity <= ^tx_data[6:0];       // Parity for 7 bits
-                        8: tx_parity <= ^tx_data[7:0];       // Parity for 8 bits
-                        default: tx_parity <= ^tx_data;       // Default parity
-                    endcase                  // End parity case
-
-                    tx_active <= 1;          // TX is now active
-                    serial_tx <= 0;          // Send start bit
-                    tx_state <= START;       // Go to start state
-                end
-            end
-
-            START: begin                     // Send start bit
-                serial_tx <= tx_reg[0];      // Send first data bit
-                tx_reg <= tx_reg >> 1;       // Shift data right
-                tx_bit <= 1;                 // Set bit counter
-                tx_state <= DATA;            // Go to data state
-            end
-
-            DATA: begin                      // Send data bits
-                serial_tx <= tx_reg[0];      // Send current data bit
-                tx_reg <= tx_reg >> 1;       // Shift to next bit
-                if (tx_bit == NUM_DATA_BITS - 1) begin // Check last bit
-                    tx_state <= PARITY;      // Go to parity state
-                end
-                else begin
-                    tx_bit <= tx_bit + 1;    // Move to next bit
-                end
-            end
-
-            PARITY: begin                    // Send parity bit
-                serial_tx <= tx_parity;      // Send parity bit
-                tx_state <= STOP;            // Go to stop state
-            end
-
-            STOP: begin                      // Send stop bit
-                serial_tx <= 1;              // Send stop bit
-                tx_state <= DONE;            // Go to done state
-            end
-
-            DONE: begin                      // Transmission is complete
-                tx_active <= 0;              // TX is no longer active
-                tx_done <= 1;                // Tell that TX is complete
-                tx_state <= IDLE;            // Go back to idle state
-            end
-
-            default: begin                   // If state is invalid
-                tx_state <= IDLE;            // Go back to idle state
-            end
-        endcase                              // End TX state case
-    end
-end
-
-always @(posedge baud_clk or posedge reset) begin // RX runs on baud clock
-    if (reset) begin                        // Check for reset
-        rx_state <= IDLE;                   // Go to idle state
-        rx_bit <= 0;                        // Reset RX bit counter
-        rx_reg <= 0;                        // Clear RX register
-        rx_data <= 0;                       // Clear received data
-        rx_valid <= 0;                      // Clear valid signal
+    always @(*) begin
+        case (data_length)
+            2'b00: num_data_bits = 5;
+            2'b01: num_data_bits = 6;
+            2'b10: num_data_bits = 7;
+            2'b11: num_data_bits = 8;
+            default: num_data_bits = 8;
+        endcase
     end
 
-    else begin                              // Normal operation
-        rx_valid <= 0;                      // Clear valid signal
-        case (rx_state)                     // Check current RX state
-            IDLE: begin                     // Wait for start bit
-                rx_bit <= 0;                 // Reset bit counter
-                if (serial_rx == 0) begin   // Check for start bit
-                    rx_reg <= 0;             // Clear RX register
-                    rx_state <= START;      // Go to start state
+    // Baud divider generates tick at different rates based on baud_select
+    // Used to synchronize TX/RX timing independent of main clock
+    // 00=fastest, 11=slowest
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            baud_count <= 0;
+            baud_tick  <= 0;
+        end
+        else begin
+            baud_tick <= 0;
+
+            case (baud_select)
+                2'b00: begin
+                    if (baud_count == 8'd1) begin
+                        baud_count <= 0;
+                        baud_tick <= 1;
+                    end
+                    else
+                        baud_count <= baud_count + 1;
                 end
+
+                2'b01: begin
+                    if (baud_count == 8'd3) begin
+                        baud_count <= 0;
+                        baud_tick <= 1;
+                    end
+                    else
+                        baud_count <= baud_count + 1;
+                end
+
+                2'b10: begin
+                    if (baud_count == 8'd7) begin
+                        baud_count <= 0;
+                        baud_tick <= 1;
+                    end
+                    else
+                        baud_count <= baud_count + 1;
+                end
+
+                2'b11: begin
+                    if (baud_count == 8'd15) begin
+                        baud_count <= 0;
+                        baud_tick <= 1;
+                    end
+                    else
+                        baud_count <= baud_count + 1;
+                end
+            endcase
+        end
+    end
+
+    // TX FIFO + TX state machine
+    // Used to buffer outgoing bytes and send one frame at a time
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            tx_wr_ptr  <= 0;
+            tx_rd_ptr  <= 0;
+            tx_count   <= 0;
+
+            tx_state   <= IDLE;
+            tx_bit     <= 0;
+            tx_reg     <= 0;
+            tx_parity  <= 0;
+
+            tx_active  <= 0;
+            tx_done    <= 0;
+            serial_tx  <= 1;
+        end
+        else begin
+            tx_done <= 0;
+
+            // Write data to TX FIFO when tx_start pulsed and FIFO not full
+            // Allows buffering multiple bytes for sequential transmission
+            if (tx_start && (tx_count < 16)) begin
+                tx_fifo[tx_wr_ptr] <= tx_data;
+                tx_wr_ptr <= tx_wr_ptr + 1'b1;
             end
 
-            START: begin                    // Receive start bit
-                rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
-                rx_bit <= 1;                // Set bit counter
-                rx_state <= DATA;           // Go to data state
-            end
+            // Start transmitting when idle and data available
+            // Takes next byte from FIFO and calculates its parity
+            if ((tx_state == IDLE) && baud_tick && (tx_count != 0)) begin
+                tx_reg <= tx_fifo[tx_rd_ptr];
+                tx_rd_ptr <= tx_rd_ptr + 1'b1;
 
-            DATA: begin                     // Receive data bits
-                rx_reg <= {rx_reg[6:0], serial_rx}; // Store received bit
-                if (rx_bit == NUM_DATA_BITS - 1) begin // Check last bit
-                    rx_state <= PARITY;      // Go to parity state
-                end
-                else begin
-                    rx_bit <= rx_bit + 1;    // Move to next bit
-                end
-            end
+                case (num_data_bits)
+                    5: tx_parity <= ^tx_fifo[tx_rd_ptr][4:0];
+                    6: tx_parity <= ^tx_fifo[tx_rd_ptr][5:0];
+                    7: tx_parity <= ^tx_fifo[tx_rd_ptr][6:0];
+                    default: tx_parity <= ^tx_fifo[tx_rd_ptr][7:0];
+                endcase
 
-            PARITY: begin                   // Receive parity bit
-                rx_parity <= serial_rx;     // Store received parity
-                case (NUM_DATA_BITS)        // Check parity
-                    5: begin                 // For 5 data bits
-                        if (serial_rx == ^rx_reg[4:0]) // Check parity
-                            rx_state <= STOP;         // Parity is correct
-                        else
-                            rx_state <= IDLE;         // Parity is wrong
+                tx_bit <= 0;
+                tx_active <= 1;
+                serial_tx <= 0;
+                tx_state <= START;
+            end
+            else if (baud_tick) begin
+                case (tx_state)
+
+                    IDLE: begin
+                        tx_active <= 0;
+                        serial_tx <= 1;
                     end
 
-                    6: begin                 // For 6 data bits
-                        if (serial_rx == ^rx_reg[5:0]) // Check parity
-                            rx_state <= STOP;         // Parity is correct
-                        else
-                            rx_state <= IDLE;         // Parity is wrong
+                    START: begin
+                        // First data bit is sent immediately after start bit
+                        serial_tx <= tx_reg[0];
+                        tx_reg <= tx_reg >> 1;
+                        tx_bit <= 1;
+                        tx_state <= DATA;
                     end
 
-                    7: begin                 // For 7 data bits
-                        if (serial_rx == ^rx_reg[6:0]) // Check parity
-                            rx_state <= STOP;          // Parity is correct
-                        else
-                            rx_state <= IDLE;          // Parity is wrong
+                    DATA: begin
+                        // Shift and send each data bit one per baud tick
+                        serial_tx <= tx_reg[0];
+                        tx_reg <= tx_reg >> 1;
+
+                        if (tx_bit == num_data_bits - 1) begin
+                            tx_state <= PARITY;
+                        end
+                        else begin
+                            tx_bit <= tx_bit + 1;
+                        end
                     end
 
-                    8: begin                 // For 8 data bits
-                        if (serial_rx == ^rx_reg[7:0]) // Check parity
-                            rx_state <= STOP;          // Parity is correct
-                        else
-                            rx_state <= IDLE;          // Parity is wrong
+                    PARITY: begin
+                        // Parity bit sent after all data bits for error detection
+                        serial_tx <= tx_parity;
+                        tx_state <= STOP;
                     end
 
-                    default: rx_state <= IDLE; // Go idle for invalid value
-                endcase                      // End parity check
+                    STOP: begin
+                        // Stop bit signals end of frame, must be high
+                        serial_tx <= 1;
+                        tx_state <= IDLE;
+                        tx_active <= 0;
+                        tx_done <= 1;
+                    end
+
+                    default: begin
+                        tx_state <= IDLE;
+                        tx_active <= 0;
+                        serial_tx <= 1;
+                    end
+
+                endcase
             end
 
-            STOP: begin                     // Receive stop bit
-                if (serial_rx == 1)         // Check stop bit
-                    rx_state <= DONE;       // Stop bit is correct
-                else
-                    rx_state <= IDLE;       // Stop bit is wrong
-            end
-
-            DONE: begin                     // Reception is complete
-                case(NUM_DATA_BITS)         // Check data length
-                    5: rx_data <= {3'b000, rx_reg[0], rx_reg[1], rx_reg[2], rx_reg[3], rx_reg[4]};
-                    // Put 5 received bits into rx_data
-                    6: rx_data <= {2'b00, rx_reg[0], rx_reg[1], rx_reg[2], rx_reg[3], rx_reg[4], rx_reg[5]};
-                    // Put 6 received bits into rx_data
-                    7: rx_data <= {1'b0, rx_reg[0], rx_reg[1], rx_reg[2], rx_reg[3], rx_reg[4], rx_reg[5], rx_reg[6]};
-                    // Put 7 received bits into rx_data
-                    8: rx_data <= {rx_reg[0], rx_reg[1], rx_reg[2], rx_reg[3], rx_reg[4], rx_reg[5], rx_reg[6], rx_reg[7]};
-                    // Put 8 received bits into rx_data
-                    default: rx_data <= rx_reg; // Use full RX register
-                endcase                          // End data case
-                rx_valid <= 1;                   // Tell that data is ready
-                rx_state <= IDLE;                // Go back to idle
-            end
-
-            default: begin                       // If state is invalid
-                rx_state <= IDLE;                 // Go back to idle
-            end
-
-        endcase                                  // End RX state case
+            // Update TX FIFO count (handles simultaneous read/write)
+            // If byte added and removed same clock, count stays same
+            case ({(tx_start && (tx_count < 16)),
+                   ((tx_state == IDLE) && baud_tick && (tx_count != 0))})
+                2'b10: tx_count <= tx_count + 1'b1;
+                2'b01: tx_count <= tx_count - 1'b1;
+                default: tx_count <= tx_count;
+            endcase
+        end
     end
-end
 
-endmodule                                       // End of module
+    // RX state machine + RX FIFO
+    // Used to receive serial frames and buffer incoming bytes
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            rx_wr_ptr <= 0;
+            rx_rd_ptr <= 0;
+            rx_count  <= 0;
+
+            rx_state  <= IDLE;
+            rx_bit    <= 0;
+            rx_reg    <= 0;
+
+            parity_error  <= 0;
+            framing_error <= 0;
+            overrun_error <= 0;
+
+        end
+        else begin
+
+            // Remove oldest byte when user reads
+            // Prevents re-reading same data
+            if (rx_read && (rx_count != 0))
+                rx_rd_ptr <= rx_rd_ptr + 1'b1;
+
+            if (baud_tick) begin
+                case (rx_state)
+
+                    IDLE: begin
+                        // Waiting for start bit (high to low transition on serial_rx)
+                        if (serial_rx == 0) begin
+                            rx_reg <= 0;
+                            rx_bit <= 0;
+                            rx_state <= START;
+                        end
+                    end
+
+                    START: begin
+                        // First data bit arrives one baud tick after start bit detected
+                        // Store it at position 0 (LSB first in UART)
+                        rx_reg[0] <= serial_rx;
+
+                        if (num_data_bits == 1) begin
+                            rx_bit <= 0;
+                            rx_state <= PARITY;
+                        end
+                        else begin
+                            rx_bit <= 1;
+                            rx_state <= DATA;
+                        end
+                    end
+
+                    DATA: begin
+                        // UART sends LSB first, so store at actual bit position
+                        // This simplifies reassembly later
+                        rx_reg[rx_bit] <= serial_rx;
+
+                        if (rx_bit == num_data_bits - 1)
+                            rx_state <= PARITY;
+                        else
+                            rx_bit <= rx_bit + 1'b1;
+                    end
+
+                    PARITY: begin
+                        // Parity check verifies data integrity
+                        // XOR of data bits should equal received parity bit
+                        case (num_data_bits)
+                            5: if (serial_rx == ^rx_reg[4:0])
+                                   rx_state <= STOP;
+                               else begin
+                                   parity_error <= 1;
+                                   rx_state <= IDLE;
+                               end
+
+                            6: if (serial_rx == ^rx_reg[5:0])
+                                   rx_state <= STOP;
+                               else begin
+                                   parity_error <= 1;
+                                   rx_state <= IDLE;
+                               end
+
+                            7: if (serial_rx == ^rx_reg[6:0])
+                                   rx_state <= STOP;
+                               else begin
+                                   parity_error <= 1;
+                                   rx_state <= IDLE;
+                               end
+
+                            default: if (serial_rx == ^rx_reg[7:0])
+                                         rx_state <= STOP;
+                                     else begin
+                                         parity_error <= 1;
+                                         rx_state <= IDLE;
+                                     end
+                        endcase
+                    end
+
+                    STOP: begin
+                        // Valid frame if stop bit is high (normal state)
+                        // Low stop bit indicates framing error
+                        if (serial_rx == 1) begin
+                            if (rx_count < 16) begin
+                                rx_fifo[rx_wr_ptr] <= rx_reg;
+                                rx_wr_ptr <= rx_wr_ptr + 1'b1;
+                            end
+                            else begin
+                                // FIFO full, data lost - overrun error
+                                overrun_error <= 1;
+                            end
+                        end
+                        else begin
+                            // Stop bit should be high but was low
+                            framing_error <= 1;
+                        end
+
+                        rx_state <= IDLE;
+                    end
+
+                    default: rx_state <= IDLE;
+
+                endcase
+            end
+
+            // Update RX FIFO count (handles simultaneous receive/read)
+            // If byte received and read same clock, count stays same
+            case ({((rx_state == STOP) && baud_tick &&
+                    (serial_rx == 1) && (rx_count < 16)),
+                   (rx_read && (rx_count != 0))})
+                2'b10: rx_count <= rx_count + 1'b1;
+                2'b01: rx_count <= rx_count - 1'b1;
+                default: rx_count <= rx_count;
+            endcase
+        end
+    end
+
+endmodule
