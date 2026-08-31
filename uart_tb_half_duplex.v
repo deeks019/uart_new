@@ -1,5 +1,3 @@
-`timescale 1ns/1ps
-
 module uart_tb;
 
 parameter TX_DATA1 = 8'hA5;
@@ -12,7 +10,18 @@ reg tx_start2;
 reg [1:0] baud_select;
 reg [1:0] data_length;
 
-// TX data inputs can be changed dynamically by testbench for FIFO testing
+// USER CHOICE: change this line only
+// 2'b00 = NO PARITY, 2'b01 = EVEN, 2'b10 = ODD
+parameter [1:0] PARITY_MODE = 2'b01;
+
+// Parity mode used by the tests.
+// 00 = NO PARITY, 01 = EVEN, 10 = ODD
+parameter [1:0] PARITY_MODE_EVEN = 2'b01;
+parameter [1:0] PARITY_MODE_ODD  = 2'b10;
+
+reg [1:0] parity_select;
+
+// TX data used for transmission tests
 reg [7:0] tx_data1;
 reg [7:0] tx_data2;
 
@@ -37,32 +46,33 @@ wire overrun_error2;
 reg loopback_en1;
 reg loopback_en2;
 
-// rx_read signal removes one byte from RX FIFO
-// Used to test FIFO read pointer behavior and sequential data retrieval
+// rx_read removes one byte from the RX FIFO
 reg rx_read1;
 reg rx_read2;
 
-// Error injection controls used to intentionally corrupt signals during tests
-// Tests that device properly detects and reports errors
+// These signals are used to create errors for testing
 reg parity_inject2;
 reg framing_inject2;
+reg oversampling_noise;
 
 wire serial_rx1;
 wire serial_rx2;
 
-// Loopback muxes: select whether device receives its own TX or the other device's TX
-// Allows testing both loopback and cross-device communication
+// Select loopback or the other device's TX as the RX input
 assign serial_rx1 = loopback_en1 ? serial_tx1 : serial_tx2;
 assign serial_rx2 = framing_inject2 ? 1'b0 :
                     parity_inject2  ? ~serial_tx1 :
+                    oversampling_noise ? ~serial_tx1 :
                     (loopback_en2 ? serial_tx2 : serial_tx1);
 
 // Device 1
+// The RX oversampling is handled internally by the device module.
 device d1 (
     .clk(clk),
     .reset(reset),
     .baud_select(baud_select),
     .data_length(data_length),
+    .parity_select(parity_select),
     .tx_start(tx_start1),
     .tx_data(tx_data1),
     .tx_active(tx_active1),
@@ -78,11 +88,13 @@ device d1 (
 );
 
 // Device 2
+// The RX oversampling is handled internally by the device module.
 device d2 (
     .clk(clk),
     .reset(reset),
     .baud_select(baud_select),
     .data_length(data_length),
+    .parity_select(parity_select),
     .tx_start(tx_start2),
     .tx_data(tx_data2),
     .tx_active(tx_active2),
@@ -97,14 +109,15 @@ device d2 (
     .overrun_error(overrun_error2)
 );
 
-// Clock generation at 5ns period (100MHz)
+// Clock generation at 5ns period (100MHz).
+// At baud_select = 2'b11, one UART bit lasts 16 clock cycles,
+// so the RX can use all 16 clock positions for 16x oversampling.
 initial begin
     clk = 0;
     forever #5 clk = ~clk;
 end
 
-// Reset task initializes all control signals to safe state
-// Used at start of each test to ensure clean starting condition
+// Reset everything before starting a test
 task reset_uart;
 begin
     reset = 1;
@@ -116,6 +129,7 @@ begin
     loopback_en2 = 0;
     parity_inject2 = 0;
     framing_inject2 = 0;
+    oversampling_noise = 0;
 
     repeat(3) @(posedge clk);
     reset = 0;
@@ -131,9 +145,7 @@ begin
 end
 endtask
 
-// Task to read one byte from Device 1 RX FIFO and verify correctness
-// Waits for data valid, compares against expected value, generates pulse on rx_read
-// This tests both data integrity and FIFO read pointer advancement
+// Read one byte from Device 1 RX FIFO and check it
 task read_d1;
 input [7:0] expected;
 begin
@@ -156,7 +168,7 @@ begin
 end
 endtask
 
-// Task to read one byte from Device 2 RX FIFO and verify correctness
+// Read one byte from Device 2 RX FIFO and check it
 task read_d2;
 input [7:0] expected;
 begin
@@ -184,7 +196,7 @@ integer i;
 
 reg [7:0] fifo_data [0:15];
 
-// Main testbench starts here
+// Start all tests
 initial begin
 
     $dumpfile("uart.vcd");
@@ -197,10 +209,12 @@ initial begin
     rx_read2 = 0;
     baud_select = 2'b00;
     data_length = 2'b11;
+    parity_select = PARITY_MODE;
     loopback_en1 = 0;
     loopback_en2 = 0;
     parity_inject2 = 0;
     framing_inject2 = 0;
+    oversampling_noise = 0;
 
     errors = 0;
     tx_data1 = TX_DATA1;
@@ -213,6 +227,7 @@ initial begin
     loopback_en1 = 1;
     loopback_en2 = 0;
     data_length = 2'b11;
+    // Use the slowest baud setting here so the RX has 16 clock samples per UART bit.
     baud_select = 2'b11;
 
     @(posedge clk);
@@ -248,6 +263,7 @@ initial begin
     loopback_en1 = 0;
     loopback_en2 = 1;
     data_length = 2'b11;
+    // Use the slowest baud setting here so the RX has 16 clock samples per UART bit.
     baud_select = 2'b11;
 
     @(posedge clk);
@@ -282,11 +298,61 @@ initial begin
 
     data_length = 2'b00;
     baud_select = 2'b00;
+    parity_select = PARITY_MODE_EVEN;
 
     @(posedge clk);
     tx_start1 = 1;
     wait(tx_active1);
     tx_start1 = 0;
+
+    // Check parity of the data already being transmitted.
+    if (parity_select == 2'b00) begin
+        wait(d1.tx_state == 3'd4);
+        $display("\n----- 5-bit Parity Check -----");
+        $display("Parity mode        = NO PARITY");
+        $display("5-bit NO-PARITY PASS");
+    end
+    else begin
+        wait(d1.tx_state == 3'd3);
+
+        $display("\n----- 5-bit Parity Check -----");
+        if (parity_select == 2'b01)
+            $display("Parity mode        = EVEN");
+        else
+            $display("Parity mode        = ODD");
+
+        $display("TX data            = %h (%b)", TX_DATA1, TX_DATA1);
+
+        if (parity_select == 2'b01)
+            $display("Expected parity    = %b", ^TX_DATA1[4:0]);
+        else
+            $display("Expected parity    = %b", ~(^TX_DATA1[4:0]));
+
+        $display("d1 tx_parity       = %b", d1.tx_parity);
+
+        if ((parity_select == 2'b01 && d1.tx_parity == (^TX_DATA1[4:0])) ||
+            (parity_select == 2'b10 && d1.tx_parity == ~(^TX_DATA1[4:0])))
+            $display("5-bit TX PARITY PASS");
+        else begin
+            $display("5-bit TX PARITY FAIL");
+            errors = errors + 1;
+        end
+
+        // Wait until TX has put the parity bit on the line.
+        // Do NOT check serial_rx immediately after entering PARITY,
+        // because the previous data bit is still on the line then.
+        wait(d1.tx_state == 3'd4);
+        #1;
+        $display("Received parity    = %b", serial_rx2);
+
+        if ((parity_select == 2'b01 && serial_rx2 == (^TX_DATA1[4:0])) ||
+            (parity_select == 2'b10 && serial_rx2 == ~(^TX_DATA1[4:0])))
+            $display("5-bit RX PARITY PASS");
+        else begin
+            $display("5-bit RX PARITY FAIL");
+            errors = errors + 1;
+        end
+    end
 
     wait(rx_valid2);
 
@@ -294,7 +360,7 @@ initial begin
     $display("Device 1 transmitted = %h", TX_DATA1);
     $display("Device 2 received    = %h", rx_data2);
 
-    // A5 (10100101) -> lower 5 bits = 00101 = 05
+    // Only the lower 5 bits are used.
     if (rx_data2 !== 8'h05) begin
         $display("ERROR: 5-bit mode failed");
         errors = errors + 1;
@@ -312,11 +378,61 @@ initial begin
 
     data_length = 2'b01;
     baud_select = 2'b01;
+    parity_select = PARITY_MODE_ODD;
 
     @(posedge clk);
     tx_start2 = 1;
     wait(tx_active2);
     tx_start2 = 0;
+
+    // Check parity of the data already being transmitted.
+    if (parity_select == 2'b00) begin
+        wait(d2.tx_state == 3'd4);
+        $display("\n----- 6-bit Parity Check -----");
+        $display("Parity mode        = NO PARITY");
+        $display("6-bit NO-PARITY PASS");
+    end
+    else begin
+        wait(d2.tx_state == 3'd3);
+
+        $display("\n----- 6-bit Parity Check -----");
+        if (parity_select == 2'b01)
+            $display("Parity mode        = EVEN");
+        else
+            $display("Parity mode        = ODD");
+
+        $display("TX data            = %h (%b)", TX_DATA2, TX_DATA2);
+
+        if (parity_select == 2'b01)
+            $display("Expected parity    = %b", ^TX_DATA2[5:0]);
+        else
+            $display("Expected parity    = %b", ~(^TX_DATA2[5:0]));
+
+        $display("d2 tx_parity       = %b", d2.tx_parity);
+
+        if ((parity_select == 2'b01 && d2.tx_parity == (^TX_DATA2[5:0])) ||
+            (parity_select == 2'b10 && d2.tx_parity == ~(^TX_DATA2[5:0])))
+            $display("6-bit TX PARITY PASS");
+        else begin
+            $display("6-bit TX PARITY FAIL");
+            errors = errors + 1;
+        end
+
+        // Wait until TX has put the parity bit on the line.
+        // Do NOT check serial_rx immediately after entering PARITY,
+        // because the previous data bit is still on the line then.
+        wait(d2.tx_state == 3'd4);
+        #1;
+        $display("Received parity    = %b", serial_rx1);
+
+        if ((parity_select == 2'b01 && serial_rx1 == (^TX_DATA2[5:0])) ||
+            (parity_select == 2'b10 && serial_rx1 == ~(^TX_DATA2[5:0])))
+            $display("6-bit RX PARITY PASS");
+        else begin
+            $display("6-bit RX PARITY FAIL");
+            errors = errors + 1;
+        end
+    end
 
     wait(rx_valid1);
 
@@ -324,7 +440,7 @@ initial begin
     $display("Device 2 transmitted = %h", TX_DATA2);
     $display("Device 1 received    = %h", rx_data1);
 
-    // 3C (00111100) -> lower 6 bits = 111100 = 3C
+    // Only the lower 6 bits are used.
     if (rx_data1 !== 8'h3C) begin
         $display("ERROR: 6-bit mode failed");
         errors = errors + 1;
@@ -348,13 +464,62 @@ initial begin
     wait(tx_active1);
     tx_start1 = 0;
 
+    // Check parity of the data already being transmitted.
+    if (parity_select == 2'b00) begin
+        wait(d1.tx_state == 3'd4);
+        $display("\n----- 7-bit Parity Check -----");
+        $display("Parity mode        = NO PARITY");
+        $display("7-bit NO-PARITY PASS");
+    end
+    else begin
+        wait(d1.tx_state == 3'd3);
+
+        $display("\n----- 7-bit Parity Check -----");
+        if (parity_select == 2'b01)
+            $display("Parity mode        = EVEN");
+        else
+            $display("Parity mode        = ODD");
+
+        $display("TX data            = %h (%b)", TX_DATA1, TX_DATA1);
+
+        if (parity_select == 2'b01)
+            $display("Expected parity    = %b", ^TX_DATA1[6:0]);
+        else
+            $display("Expected parity    = %b", ~(^TX_DATA1[6:0]));
+
+        $display("d1 tx_parity       = %b", d1.tx_parity);
+
+        if ((parity_select == 2'b01 && d1.tx_parity == (^TX_DATA1[6:0])) ||
+            (parity_select == 2'b10 && d1.tx_parity == ~(^TX_DATA1[6:0])))
+            $display("7-bit TX PARITY PASS");
+        else begin
+            $display("7-bit TX PARITY FAIL");
+            errors = errors + 1;
+        end
+
+        // Wait until TX has put the parity bit on the line.
+        // Do NOT check serial_rx immediately after entering PARITY,
+        // because the previous data bit is still on the line then.
+        wait(d1.tx_state == 3'd4);
+        #1;
+        $display("Received parity    = %b", serial_rx2);
+
+        if ((parity_select == 2'b01 && serial_rx2 == (^TX_DATA1[6:0])) ||
+            (parity_select == 2'b10 && serial_rx2 == ~(^TX_DATA1[6:0])))
+            $display("7-bit RX PARITY PASS");
+        else begin
+            $display("7-bit RX PARITY FAIL");
+            errors = errors + 1;
+        end
+    end
+
     wait(rx_valid2);
 
     $display("\n----- 7-bit Mode -----");
     $display("Device 1 transmitted = %h", TX_DATA1);
     $display("Device 2 received    = %h", rx_data2);
 
-    // A5 (10100101) -> lower 7 bits = 0100101 = 25
+    // Only the lower 7 bits are used.
     if (rx_data2 !== 8'h25) begin
         $display("ERROR: 7-bit mode failed");
         errors = errors + 1;
@@ -377,6 +542,55 @@ initial begin
     tx_start2 = 1;
     wait(tx_active2);
     tx_start2 = 0;
+
+    // Check parity of the data already being transmitted.
+    if (parity_select == 2'b00) begin
+        wait(d2.tx_state == 3'd4);
+        $display("\n----- 8-bit Parity Check -----");
+        $display("Parity mode        = NO PARITY");
+        $display("8-bit NO-PARITY PASS");
+    end
+    else begin
+        wait(d2.tx_state == 3'd3);
+
+        $display("\n----- 8-bit Parity Check -----");
+        if (parity_select == 2'b01)
+            $display("Parity mode        = EVEN");
+        else
+            $display("Parity mode        = ODD");
+
+        $display("TX data            = %h (%b)", TX_DATA2, TX_DATA2);
+
+        if (parity_select == 2'b01)
+            $display("Expected parity    = %b", ^TX_DATA2[7:0]);
+        else
+            $display("Expected parity    = %b", ~(^TX_DATA2[7:0]));
+
+        $display("d2 tx_parity       = %b", d2.tx_parity);
+
+        if ((parity_select == 2'b01 && d2.tx_parity == (^TX_DATA2[7:0])) ||
+            (parity_select == 2'b10 && d2.tx_parity == ~(^TX_DATA2[7:0])))
+            $display("8-bit TX PARITY PASS");
+        else begin
+            $display("8-bit TX PARITY FAIL");
+            errors = errors + 1;
+        end
+
+        // Wait until TX has put the parity bit on the line.
+        // Do NOT check serial_rx immediately after entering PARITY,
+        // because the previous data bit is still on the line then.
+        wait(d2.tx_state == 3'd4);
+        #1;
+        $display("Received parity    = %b", serial_rx1);
+
+        if ((parity_select == 2'b01 && serial_rx1 == (^TX_DATA2[7:0])) ||
+            (parity_select == 2'b10 && serial_rx1 == ~(^TX_DATA2[7:0])))
+            $display("8-bit RX PARITY PASS");
+        else begin
+            $display("8-bit RX PARITY FAIL");
+            errors = errors + 1;
+        end
+    end
 
     wait(rx_valid1);
 
@@ -497,6 +711,12 @@ initial begin
 
     // TEST 9: Parity error detection
     // Injects bit error in parity field to verify device detects corruption
+    if (parity_select == 2'b00) begin
+        $display("\n========================================");
+        $display("TEST 9: PARITY ERROR SKIPPED (NO PARITY)");
+        $display("========================================");
+    end
+    else begin
     reset_uart;
 
     data_length = 2'b11;
@@ -511,10 +731,10 @@ initial begin
     wait(tx_active1);
     tx_start1 = 0;
 
-    // Wait until receiver is in parity state before corrupting signal
+    // Wait until the parity bit is being received.
     wait(d2.rx_state == 3'd3);
 
-    // Flip parity bit by inverting the signal line
+    // Invert the parity bit to create an error.
     parity_inject2 = 1;
     @(posedge clk);
     parity_inject2 = 0;
@@ -527,6 +747,7 @@ initial begin
     else begin
         $display("ERROR: Parity error NOT detected");
         errors = errors + 1;
+    end
     end
 
     // TEST 10: Framing error detection
@@ -545,7 +766,7 @@ initial begin
     wait(tx_active1);
     tx_start1 = 0;
 
-    // Wait until receiver is in stop bit state before corrupting signal
+    // Wait until the stop bit is being received.
     wait(d2.rx_state == 3'd4);
 
     // Force stop bit to 0 (should be 1)
@@ -601,6 +822,52 @@ initial begin
         errors = errors + 1;
     end
 
+    // TEST 12: 16x RX oversampling noise tolerance
+    // Adds a short noise pulse during one received data bit.
+    // The 16x receiver should ignore the short disturbance because
+    // the majority of the 16 samples still contain the correct value.
+    reset_uart;
+
+    data_length = 2'b11;
+    baud_select = 2'b11;
+
+    $display("\n========================================");
+    $display("TEST 12: 16x RX OVERSAMPLING NOISE");
+    $display("========================================");
+
+    @(posedge clk);
+    tx_start1 = 1;
+    wait(tx_active1);
+    tx_start1 = 0;
+
+    // Wait for the first data bit.
+    wait(d2.rx_state == 3'd2);
+    wait(d2.rx_bit == 3'd0);
+
+    // Inject a short disturbance for only 2 of the 16 samples.
+    repeat(4) @(posedge clk);
+    oversampling_noise = 1;
+    repeat(2) @(posedge clk);
+    oversampling_noise = 0;
+
+    wait(rx_valid2);
+
+    $display("16x oversampling received = %h", rx_data2);
+    $display("Expected                  = %h", TX_DATA1);
+
+    if (rx_data2 !== TX_DATA1) begin
+        $display("ERROR: 16x oversampling noise test failed");
+        errors = errors + 1;
+    end
+    else begin
+        $display("16x oversampling noise tolerance PASS");
+    end
+
+    @(negedge clk);
+    rx_read2 = 1;
+    @(negedge clk);
+    rx_read2 = 0;
+
     // Summary of all test results
     $display("\n========================================");
 
@@ -616,3 +883,4 @@ initial begin
 end
 
 endmodule
+
