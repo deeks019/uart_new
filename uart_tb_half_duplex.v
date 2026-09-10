@@ -58,6 +58,18 @@ reg oversampling_noise;
 wire serial_rx1;
 wire serial_rx2;
 
+// CTS/RTS hardware flow-control signals.
+// Existing tests keep flow control disabled so their behavior is unchanged.
+// Test 13 enables the CTS/RTS connection between the two devices.
+wire rts1;
+wire rts2;
+wire cts1;
+wire cts2;
+reg flow_control_en;
+
+assign cts1 = flow_control_en ? rts2 : 1'b0;
+assign cts2 = flow_control_en ? rts1 : 1'b0;
+
 // Select loopback or the other device's TX as the RX input
 assign serial_rx1 = loopback_en1 ? serial_tx1 : serial_tx2;
 assign serial_rx2 = framing_inject2 ? 1'b0 :
@@ -75,6 +87,8 @@ device d1 (
     .parity_select(parity_select),
     .tx_start(tx_start1),
     .tx_data(tx_data1),
+    .cts(cts1),
+    .rts(rts1),
     .tx_active(tx_active1),
     .tx_done(tx_done1),
     .serial_tx(serial_tx1),
@@ -97,6 +111,8 @@ device d2 (
     .parity_select(parity_select),
     .tx_start(tx_start2),
     .tx_data(tx_data2),
+    .cts(cts2),
+    .rts(rts2),
     .tx_active(tx_active2),
     .tx_done(tx_done2),
     .serial_tx(serial_tx2),
@@ -130,6 +146,7 @@ begin
     parity_inject2 = 0;
     framing_inject2 = 0;
     oversampling_noise = 0;
+    flow_control_en = 0;
 
     repeat(3) @(posedge clk);
     reset = 0;
@@ -195,6 +212,8 @@ integer errors;
 integer i;
 
 reg [7:0] fifo_data [0:15];
+reg expected_parity;
+reg [4:0] tx_count_before_pause;
 
 // Start all tests
 initial begin
@@ -215,6 +234,7 @@ initial begin
     parity_inject2 = 0;
     framing_inject2 = 0;
     oversampling_noise = 0;
+    flow_control_en = 0;
 
     errors = 0;
     tx_data1 = TX_DATA1;
@@ -736,7 +756,7 @@ initial begin
 
     // Invert the parity bit to create an error.
     parity_inject2 = 1;
-    @(posedge clk);
+    repeat(3) @(posedge clk);
     parity_inject2 = 0;
 
     repeat(3) @(posedge clk);
@@ -772,7 +792,7 @@ initial begin
     // Force stop bit to 0 (should be 1)
     // This violates UART frame format
     framing_inject2 = 1;
-    @(posedge clk);
+    repeat(3) @(posedge clk);
     framing_inject2 = 0;
 
     repeat(3) @(posedge clk);
@@ -867,6 +887,223 @@ initial begin
     rx_read2 = 1;
     @(negedge clk);
     rx_read2 = 0;
+
+    // TEST 13: CTS/RTS FIFO flow control
+    // Fills the receiver FIFO close to capacity and checks that
+    // RTS stops the remote transmitter before an RX FIFO overrun.
+    reset_uart;
+
+    data_length = 2'b11;
+    baud_select = 2'b00;
+    flow_control_en = 1;
+
+    $display("\n========================================");
+    $display("TEST 13: CTS/RTS FIFO FLOW CONTROL");
+    $display("========================================");
+
+    // Queue 16 bytes. CTS/RTS will stop transmission when D2
+    // reaches the RTS threshold.
+    for (i = 0; i < 16; i = i + 1) begin
+        @(negedge clk);
+        tx_data1 = 8'hC0 + i;
+        tx_start1 = 1;
+
+        @(negedge clk);
+        tx_start1 = 0;
+    end
+
+    // Wait until D2 tells D1 to stop.
+    wait(d2.rx_count == 15);
+    #1;
+
+    if (rts2 !== 1'b1) begin
+        $display("ERROR: RTS did not go HIGH at RX FIFO count 15");
+        errors = errors + 1;
+    end
+    else begin
+        $display("D2 RTS HIGH at RX FIFO count = %0d PASS", d2.rx_count);
+    end
+
+    // The transmitter must not start another byte while CTS is high.
+    repeat(20) @(posedge clk);
+
+    if ((d1.tx_state == d1.IDLE) && (rts2 == 1'b1)) begin
+        $display("D1 transmission paused by CTS PASS");
+    end
+    else begin
+        $display("ERROR: CTS did not pause D1 transmission");
+        errors = errors + 1;
+    end
+
+    // Remove one byte from D2 RX FIFO. RTS should go low again.
+    @(negedge clk);
+    rx_read2 = 1;
+    @(negedge clk);
+    rx_read2 = 0;
+
+    @(posedge clk);
+    #1;
+
+    if (rts2 !== 1'b0) begin
+        $display("ERROR: RTS did not return LOW after RX FIFO read");
+        errors = errors + 1;
+    end
+    else begin
+        $display("D2 RTS LOW after RX FIFO read PASS");
+    end
+
+    // CTS is clear again, so D1 can continue transmitting.
+    wait(d2.rx_count == 16);
+
+    $display("CTS/RTS flow control PASS");
+
+    flow_control_en = 0;
+
+    // TEST 14: Simple normal transfer like the basic testbench
+    reset_uart;
+
+    data_length = 2'b11;
+    baud_select = 2'b11;
+    parity_select = 2'b00;
+    tx_data1 = TX_DATA1;
+
+    $display("");
+    $display("TEST 14: NORMAL 16x OVERSAMPLING");
+
+    @(negedge clk);
+    tx_start1 = 1;
+    @(negedge clk);
+    tx_start1 = 0;
+
+    wait(rx_valid2);
+    $display("TX DATA = %h", TX_DATA1);
+    $display("RX DATA = %h", rx_data2);
+
+    if (rx_data2 === TX_DATA1)
+        $display("NORMAL OVERSAMPLING PASS");
+    else begin
+        $display("NORMAL OVERSAMPLING FAIL");
+        errors = errors + 1;
+    end
+
+    @(negedge clk);
+    rx_read2 = 1;
+    @(negedge clk);
+    rx_read2 = 0;
+
+    // TEST 15: Even parity check like the basic testbench
+    reset_uart;
+
+    data_length = 2'b11;
+    baud_select = 2'b11;
+    parity_select = 2'b01;
+    tx_data1 = TX_DATA1;
+    expected_parity = ^TX_DATA1;
+
+    $display("");
+    $display("TEST 15: EVEN PARITY");
+    $display("Expected parity = %b", expected_parity);
+
+    @(negedge clk);
+    tx_start1 = 1;
+    @(negedge clk);
+    tx_start1 = 0;
+
+    wait(d1.tx_state == d1.PARITY);
+    wait((d1.tx_state == d1.PARITY) && (d1.tx_sample_count == 4'd1));
+    #1;
+    $display("Actual parity   = %b", serial_tx1);
+
+    if (serial_tx1 === expected_parity)
+        $display("EVEN PARITY PASS");
+    else begin
+        $display("EVEN PARITY FAIL");
+        errors = errors + 1;
+    end
+
+    wait(rx_valid2);
+    @(negedge clk);
+    rx_read2 = 1;
+    @(negedge clk);
+    rx_read2 = 0;
+
+    // TEST 16: Odd parity check like the basic testbench
+    reset_uart;
+
+    data_length = 2'b11;
+    baud_select = 2'b11;
+    parity_select = 2'b10;
+    tx_data1 = TX_DATA1;
+    expected_parity = ~(^TX_DATA1);
+
+    $display("");
+    $display("TEST 16: ODD PARITY");
+    $display("Expected parity = %b", expected_parity);
+
+    @(negedge clk);
+    tx_start1 = 1;
+    @(negedge clk);
+    tx_start1 = 0;
+
+    wait(d1.tx_state == d1.PARITY);
+    wait((d1.tx_state == d1.PARITY) && (d1.tx_sample_count == 4'd1));
+    #1;
+    $display("Actual parity   = %b", serial_tx1);
+
+    if (serial_tx1 === expected_parity)
+        $display("ODD PARITY PASS");
+    else begin
+        $display("ODD PARITY FAIL");
+        errors = errors + 1;
+    end
+
+    wait(rx_valid2);
+    @(negedge clk);
+    rx_read2 = 1;
+    @(negedge clk);
+    rx_read2 = 0;
+
+    // TEST 17: Force bad RX timing like the basic testbench
+    reset_uart;
+
+    data_length = 2'b11;
+    baud_select = 2'b11;
+    parity_select = 2'b00;
+    tx_data1 = TX_DATA1;
+
+    $display("");
+    $display("TEST 17: DELIBERATELY BAD OVERSAMPLING");
+    $display("Normal RX sample count : 0 to 15");
+    $display("Faulty RX sample count : 0 to 11");
+
+    @(negedge clk);
+    tx_start1 = 1;
+    @(negedge clk);
+    tx_start1 = 0;
+
+    wait(d2.rx_state != d2.IDLE);
+    $display("Forcing D2 RX sampling counter early...");
+    force d2.rx_sample_count = 4'd11;
+    repeat(20) @(posedge clk);
+    release d2.rx_sample_count;
+    $display("Released RX counter force.");
+    repeat(500) @(posedge clk);
+
+    if (rx_valid2) begin
+        $display("Faulty RX DATA = %h", rx_data2);
+        if (rx_data2 !== TX_DATA1)
+            $display("EXPECTED: DATA WAS MISREAD");
+        else
+            $display("Data happened to remain correct.");
+
+        @(negedge clk);
+        rx_read2 = 1;
+        @(negedge clk);
+        rx_read2 = 0;
+    end
+    else begin
+        $display("RX did not produce valid data.");
+    end
 
     // Summary of all test results
     $display("\n========================================");
